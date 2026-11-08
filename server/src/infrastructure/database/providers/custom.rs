@@ -52,7 +52,7 @@ pub async fn list_custom_providers(
 
     let rows = sqlx::query(
         "SELECT id, name, alias, category, protocol, base_url, enabled, meta \
-         FROM providers WHERE category = 'custom_provider' ORDER BY created_at DESC",
+         FROM providers WHERE category = 'custom_provider' AND provider_id = id ORDER BY created_at DESC",
     )
     .fetch_all(&pool)
     .await
