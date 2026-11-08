@@ -82,15 +82,6 @@ pub async fn add_provider(
         return Err(APIError::new(400, "Invalid provider protocol"));
     }
 
-    let base_url = payload
-        .base_url
-        .as_deref()
-        .map(str::trim)
-        .filter(|url| !url.is_empty())
-        .ok_or_else(|| APIError::new(400, "Field 'base_url' is required"))?
-        .to_owned();
-    assert_public_url(&base_url).await?;
-
     let api_key = payload
         .api_key
         .as_deref()
@@ -105,37 +96,46 @@ pub async fn add_provider(
         ));
     }
 
-    // A UUID v4 is the immutable internal id, like Node's `crypto.randomUUID()`.
-    let id = match payload.id.as_deref().map(sanitize_id) {
-        Some(explicit) if !explicit.is_empty() => {
-            // If a custom provider with this ID already exists, this is adding a sub-connection / additional account.
-            if let Ok(Some(parent)) = find_custom_provider(database, &explicit).await {
-                let conn_id = Uuid::new_v4().to_string();
-                crate::infrastructure::database::providers::add_custom_provider_connection(
-                    database,
-                    &parent,
-                    &conn_id,
-                    &name,
-                    api_key.as_deref().unwrap_or(""),
-                )
-                .await?;
+    // If an explicit ID points to an existing custom provider, this is adding a sub-connection / additional account.
+    if let Some(explicit) = payload.id.as_deref().map(sanitize_id).filter(|s| !s.is_empty()) {
+        if let Ok(Some(parent)) = find_custom_provider(database, &explicit).await {
+            let conn_id = Uuid::new_v4().to_string();
+            crate::infrastructure::database::providers::add_custom_provider_connection(
+                database,
+                &parent,
+                &conn_id,
+                &name,
+                api_key.as_deref().unwrap_or(""),
+            )
+            .await?;
 
-                refresh_custom_provider(&state.providers, database, &explicit).await?;
+            refresh_custom_provider(&state.providers, database, &explicit).await?;
 
-                let entry =
-                    crate::features::providers::management::routes::detail_entry(&state, &explicit)
-                        .await?;
-                return Ok(Json(entry));
-            }
-
-            if provider_exists(database, &explicit).await? {
-                return Err(APIError::new(
-                    400,
-                    format!("Provider ID '{explicit}' already exists"),
-                ));
-            }
-            explicit
+            let entry =
+                crate::features::providers::management::routes::detail_entry(&state, &explicit)
+                    .await?;
+            return Ok(Json(entry));
         }
+
+        if provider_exists(database, &explicit).await? {
+            return Err(APIError::new(
+                400,
+                format!("Provider ID '{explicit}' already exists"),
+            ));
+        }
+    }
+
+    let base_url = payload
+        .base_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|url| !url.is_empty())
+        .ok_or_else(|| APIError::new(400, "Field 'base_url' is required"))?
+        .to_owned();
+    assert_public_url(&base_url).await?;
+
+    let id = match payload.id.as_deref().map(sanitize_id) {
+        Some(explicit) if !explicit.is_empty() => explicit,
         _ => Uuid::new_v4().to_string(),
     };
 
