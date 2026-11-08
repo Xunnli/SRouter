@@ -1,6 +1,6 @@
 import { useState } from "react"
 
-import { addCustomProvider, patchProvider } from "@/api/providers"
+import { addCustomProvider } from "@/api/providers"
 import { toast } from "@/components/arc/toast-stack/toast-stack"
 
 type UseAPIKeyOptions = {
@@ -30,25 +30,21 @@ export default function useAPIKey({
 
     setPending(true)
     try {
-      // If adding an account / connection with a custom label, register it as a sub-connection
-      // through POST /v1/providers with the target provider ID; otherwise update existing row via patch.
-      if (connectionName.trim()) {
-        await addCustomProvider({
-          name: connectionName.trim(),
-          api_key: apiKey.trim(),
-          prefix: prefix.trim() || undefined,
-          protocol: "openai",
-          base_url: "inherit",
-          ...({ id: providerID } as Record<string, string>),
-        })
-      } else {
-        await patchProvider(providerID, {
-          name: connectionName.trim() || undefined,
-          api_key: apiKey.trim(),
-          prefix: prefix.trim() || undefined,
-        })
-      }
-      toast.success("Provider credentials updated!")
+      // Connect account on an existing provider always adds a new account connection
+      // so it never overwrites the previous credentials.
+      const label =
+        connectionName.trim() ||
+        `Account ${new Date().toLocaleDateString("en-US", { month: "numeric", day: "numeric" })}`
+
+      await addCustomProvider({
+        name: label,
+        api_key: apiKey.trim(),
+        prefix: prefix.trim() || undefined,
+        protocol: "openai",
+        base_url: "inherit",
+        ...({ id: providerID } as Record<string, string>),
+      })
+      toast.success("Account connected successfully!")
       onSuccess()
       onOpenChange(false)
       setAPIKey("")
