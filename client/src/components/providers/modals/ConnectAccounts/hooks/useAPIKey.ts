@@ -1,6 +1,6 @@
 import { useState } from "react"
 
-import { patchProvider } from "@/api/providers"
+import { addCustomProvider, patchProvider } from "@/api/providers"
 import { toast } from "@/components/arc/toast-stack/toast-stack"
 
 type UseAPIKeyOptions = {
@@ -30,11 +30,24 @@ export default function useAPIKey({
 
     setPending(true)
     try {
-      await patchProvider(providerID, {
-        name: connectionName.trim() || undefined,
-        api_key: apiKey.trim(),
-        prefix: prefix.trim() || undefined,
-      })
+      // If adding an account / connection with a custom label, register it as a sub-connection
+      // through POST /v1/providers with the target provider ID; otherwise update existing row via patch.
+      if (connectionName.trim()) {
+        await addCustomProvider({
+          name: connectionName.trim(),
+          api_key: apiKey.trim(),
+          prefix: prefix.trim() || undefined,
+          protocol: "openai",
+          base_url: "inherit",
+          ...({ id: providerID } as Record<string, string>),
+        })
+      } else {
+        await patchProvider(providerID, {
+          name: connectionName.trim() || undefined,
+          api_key: apiKey.trim(),
+          prefix: prefix.trim() || undefined,
+        })
+      }
       toast.success("Provider credentials updated!")
       onSuccess()
       onOpenChange(false)

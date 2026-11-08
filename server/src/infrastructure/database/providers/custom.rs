@@ -137,6 +137,44 @@ pub async fn create_custom_provider(
     Ok(())
 }
 
+/// Inserts a new secondary connection attached to an existing custom provider.
+pub async fn add_custom_provider_connection(
+    database: &AppDatabase,
+    parent: &CustomProviderRow,
+    connection_id: &str,
+    name: &str,
+    api_key: &str,
+) -> Result<(), APIError> {
+    let pool = database.sqlite_required(constants::database::PROVIDERS_UNSUPPORTED)?;
+
+    let mut credentials = Map::new();
+    credentials.insert("api_key".to_owned(), Value::String(api_key.to_owned()));
+
+    sqlx::query(
+        "INSERT INTO providers \
+         (id, provider_id, name, alias, category, protocol, base_url, enabled, credentials, meta, created_at) \
+         VALUES (?, ?, ?, ?, 'custom_provider', ?, ?, 1, ?, '{}', ?)",
+    )
+    .bind(connection_id)
+    .bind(&parent.id)
+    .bind(name)
+    .bind(parent.prefix.as_deref())
+    .bind(&parent.protocol)
+    .bind(&parent.base_url)
+    .bind(Value::Object(credentials).to_string())
+    .bind(now_ms())
+    .execute(&pool)
+    .await
+    .map_err(|error| {
+        APIError::new(
+            500,
+            constants::database::with_context("add custom provider connection", error),
+        )
+    })?;
+
+    Ok(())
+}
+
 fn delete_failed(error: sqlx::Error) -> APIError {
     APIError::new(
         500,

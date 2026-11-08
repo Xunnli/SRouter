@@ -27,8 +27,9 @@ use crate::features::providers::custom::catalog::{
     CATALOG_RETRY_MS, CATALOG_TTL_MS, SharedCatalog, read_catalog, write_catalog,
 };
 use crate::features::providers::executor::{BoxFuture, ProviderExecutor};
+use crate::features::providers::rotation::{AccountRotator, is_rate_limited, round_robin_enabled};
 use crate::infrastructure::database::AppDatabase;
-use crate::infrastructure::database::providers::{CustomCredentials, load_custom_credentials};
+use crate::infrastructure::database::providers::{CustomCredentials, load_all_custom_credentials};
 use crate::infrastructure::upstream::UpstreamClient;
 use crate::protocol::image::ImageGenerationRequest;
 use crate::protocol::model::ChatCompletionRequest;
@@ -60,6 +61,7 @@ pub struct CustomProvider {
     client: UpstreamClient,
     catalog: SharedCatalog,
     refresh_lock: Arc<tokio::sync::Mutex<()>>,
+    rotator: Arc<AccountRotator>,
 }
 
 impl CustomProvider {
@@ -73,6 +75,7 @@ impl CustomProvider {
             client: UpstreamClient::new()?,
             catalog: crate::features::providers::custom::catalog::CustomCatalog::shared_empty(),
             refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
+            rotator: AccountRotator::shared(),
         })
     }
 
@@ -88,17 +91,44 @@ impl CustomProvider {
         self.row.prefix.as_deref().unwrap_or(&self.row.id)
     }
 
-    /// Reads the row's credentials at request time. A row without a database
-    /// handle cannot be reached; the gateway always has one.
-    async fn credentials(&self) -> Result<CustomCredentials, APIError> {
+    /// Reads all enabled candidate credentials for this custom provider.
+    async fn candidates(&self) -> Result<Vec<CustomCredentials>, APIError> {
         let database = self
             .database
             .as_ref()
             .ok_or_else(|| APIError::new(500, constants::providers::DATABASE_REQUIRED))?;
 
-        Ok(load_custom_credentials(database, &self.row.id)
-            .await?
-            .unwrap_or_default())
+        let list = load_all_custom_credentials(database, &self.row.id).await?;
+        if list.is_empty() {
+            Ok(vec![CustomCredentials {
+                id: self.row.id.clone(),
+                ..Default::default()
+            }])
+        } else {
+            Ok(list)
+        }
+    }
+
+    /// Rotates across candidates, newest first, respecting cooldowns and
+    /// the round-robin toggle.
+    async fn pick_account(
+        &self,
+        candidates: &[CustomCredentials],
+    ) -> Result<CustomCredentials, APIError> {
+        let database = self
+            .database
+            .as_ref()
+            .ok_or_else(|| APIError::new(500, constants::providers::DATABASE_REQUIRED))?;
+        let enabled = round_robin_enabled(database, &self.row.id).await;
+        let ids: Vec<String> = candidates.iter().map(|c| c.id.clone()).collect();
+
+        Ok(candidates[self.rotator.choose(enabled, &ids)].clone())
+    }
+
+    /// Reads credentials at request time, picking an account via rotation.
+    async fn credentials(&self) -> Result<CustomCredentials, APIError> {
+        let candidates = self.candidates().await?;
+        self.pick_account(&candidates).await
     }
 
     /// The upstream chat endpoint for this protocol family.
@@ -187,37 +217,67 @@ impl CustomProvider {
         model: &str,
         request: &ChatCompletionRequest,
     ) -> Result<Value, APIError> {
-        let credentials = self.credentials().await?;
+        let candidates = self.candidates().await?;
         let body = self.request_body(model, request, false)?;
-        let response = self
-            .sign(
-                self.client
-                    .raw()
-                    .post(self.chat_url())
-                    .timeout(self.client.request_timeout()),
-                &credentials,
-            )
-            .json(&body)
-            .send()
-            .await
-            .map_err(upstream_error)?;
+        let mut last_error: Option<APIError> = None;
 
-        let status = response.status();
-        if !status.is_success() {
-            let detail = response.text().await.unwrap_or_default();
-            return Err(upstream_status_error(status, &detail));
+        for _ in 0..candidates.len() {
+            let credentials = self.pick_account(&candidates).await?;
+            let response = self
+                .sign(
+                    self.client
+                        .raw()
+                        .post(self.chat_url())
+                        .timeout(self.client.request_timeout()),
+                    &credentials,
+                )
+                .json(&body)
+                .send()
+                .await
+                .map_err(upstream_error);
+
+            let response = match response {
+                Ok(resp) => resp,
+                Err(err) => {
+                    if is_rate_limited(&err) {
+                        self.rotator.cool(&credentials.id);
+                        last_error = Some(err);
+                        continue;
+                    }
+                    return Err(err);
+                }
+            };
+
+            let status = response.status();
+            if !status.is_success() {
+                let detail = response.text().await.unwrap_or_default();
+                let err = upstream_status_error(status, &detail);
+                if is_rate_limited(&err) {
+                    self.rotator.cool(&credentials.id);
+                    last_error = Some(err);
+                    continue;
+                }
+                return Err(err);
+            }
+
+            let payload: Value = response.json().await.map_err(|error| {
+                APIError::new(500, constants::providers::could_not_decode_response(&error))
+            })?;
+
+            return Ok(match self.shape {
+                ProviderShape::OpenAI => payload,
+                ProviderShape::Anthropic => {
+                    anthropic_response_to_openai(&payload, &request.model, now_ms() / 1000)
+                }
+            });
         }
 
-        let payload: Value = response.json().await.map_err(|error| {
-            APIError::new(500, constants::providers::could_not_decode_response(&error))
-        })?;
-
-        Ok(match self.shape {
-            ProviderShape::OpenAI => payload,
-            ProviderShape::Anthropic => {
-                anthropic_response_to_openai(&payload, &request.model, now_ms() / 1000)
-            }
-        })
+        Err(last_error.unwrap_or_else(|| {
+            APIError::new(
+                500,
+                constants::providers::request_failed("All custom accounts rate limited"),
+            )
+        }))
     }
 
     pub async fn chat_completion_stream(
@@ -225,27 +285,57 @@ impl CustomProvider {
         model: &str,
         request: &ChatCompletionRequest,
     ) -> Result<ProviderStream, APIError> {
-        let credentials = self.credentials().await?;
+        let candidates = self.candidates().await?;
         let body = self.request_body(model, request, true)?;
-        let response = self
-            .sign(self.client.raw().post(self.chat_url()), &credentials)
-            .json(&body)
-            .send()
-            .await
-            .map_err(upstream_error)?;
+        let mut last_error: Option<APIError> = None;
 
-        let status = response.status();
-        if !status.is_success() {
-            let detail = response.text().await.unwrap_or_default();
-            return Err(upstream_stream_status_error(status, &detail));
+        for _ in 0..candidates.len() {
+            let credentials = self.pick_account(&candidates).await?;
+            let response = self
+                .sign(self.client.raw().post(self.chat_url()), &credentials)
+                .json(&body)
+                .send()
+                .await
+                .map_err(upstream_error);
+
+            let response = match response {
+                Ok(resp) => resp,
+                Err(err) => {
+                    if is_rate_limited(&err) {
+                        self.rotator.cool(&credentials.id);
+                        last_error = Some(err);
+                        continue;
+                    }
+                    return Err(err);
+                }
+            };
+
+            let status = response.status();
+            if !status.is_success() {
+                let detail = response.text().await.unwrap_or_default();
+                let err = upstream_stream_status_error(status, &detail);
+                if is_rate_limited(&err) {
+                    self.rotator.cool(&credentials.id);
+                    last_error = Some(err);
+                    continue;
+                }
+                return Err(err);
+            }
+
+            return Ok(match self.shape {
+                ProviderShape::OpenAI => encode_stream(response.bytes_stream()),
+                ProviderShape::Anthropic => {
+                    stream_response(response.bytes_stream(), request.model.clone())
+                }
+            });
         }
 
-        Ok(match self.shape {
-            ProviderShape::OpenAI => encode_stream(response.bytes_stream()),
-            ProviderShape::Anthropic => {
-                stream_response(response.bytes_stream(), request.model.clone())
-            }
-        })
+        Err(last_error.unwrap_or_else(|| {
+            APIError::new(
+                500,
+                constants::providers::request_failed("All custom accounts rate limited"),
+            )
+        }))
     }
 
     /// The live model ids. A fetch is due when the snapshot is empty past the
@@ -387,6 +477,10 @@ impl ProviderExecutor for CustomProvider {
 
     fn alias(&self) -> &str {
         self.model_prefix()
+    }
+
+    fn supports_rotation(&self) -> bool {
+        true
     }
 
     fn models(&self) -> Vec<String> {

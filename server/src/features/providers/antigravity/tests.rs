@@ -58,7 +58,7 @@ fn headers_select_the_auth_header_by_token_prefix() {
     assert!(!ya29.contains_key("x-goog-api-key"));
     assert_eq!(
         ya29.get("User-Agent").map(String::as_str),
-        Some("antigravity/ide/2.1.1 darwin/arm64")
+        Some("antigravity/ide/2.6.0 darwin/arm64")
     );
     assert_eq!(
         ya29.get("Content-Type").map(String::as_str),

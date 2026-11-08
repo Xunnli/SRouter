@@ -14,6 +14,7 @@ use super::credential_string;
 /// enters a response or a log line.
 #[derive(Clone, Debug, Default)]
 pub struct CustomCredentials {
+    pub id: String,
     pub api_key: Option<String>,
     pub access_token: Option<String>,
     /// Extra headers the operator supplied, sent as-is on every request.
@@ -55,7 +56,50 @@ pub async fn load_custom_credentials(
         return Ok(None);
     };
 
-    Ok(Some(parse_custom_credentials(&raw)))
+    let mut creds = parse_custom_credentials(&raw);
+    creds.id = id.to_owned();
+    Ok(Some(creds))
+}
+
+/// Loads all enabled credentials for a custom provider, including its primary row
+/// and any attached sub-connections (where provider_id = base_id).
+pub async fn load_all_custom_credentials(
+    database: &AppDatabase,
+    base_id: &str,
+) -> Result<Vec<CustomCredentials>, APIError> {
+    let Some(pool) = database.sqlite_pool() else {
+        return Ok(Vec::new());
+    };
+
+    let rows = sqlx::query(
+        "SELECT id, credentials FROM providers \
+         WHERE (id = ? OR provider_id = ?) AND enabled = 1 \
+         ORDER BY created_at DESC",
+    )
+    .bind(base_id)
+    .bind(base_id)
+    .fetch_all(&pool)
+    .await
+    .map_err(|error| {
+        APIError::new(
+            500,
+            constants::database::with_context("read custom provider connection list", error),
+        )
+    })?;
+
+    let mut result = Vec::with_capacity(rows.len());
+    for row in rows {
+        use crate::infrastructure::database::row::text;
+        let id_val = text(&row, "id")?;
+        let cred_raw = text(&row, "credentials")?;
+        let mut creds = parse_custom_credentials(&cred_raw);
+        creds.id = id_val;
+        if creds.token().is_some() {
+            result.push(creds);
+        }
+    }
+
+    Ok(result)
 }
 
 /// Reads one credential blob. The build writes snake_case; the camelCase
@@ -69,6 +113,7 @@ pub fn parse_custom_credentials(raw: &str) -> CustomCredentials {
     };
 
     CustomCredentials {
+        id: String::new(),
         api_key: credential_string(object, &["api_key", "apiKey"]),
         access_token: credential_string(object, &["access_token", "accessToken"]),
         custom_headers: custom_headers(object, &value),

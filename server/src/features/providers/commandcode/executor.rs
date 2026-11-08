@@ -22,6 +22,7 @@ use super::types::CommandCodeEndpoints;
 use crate::error::APIError;
 use crate::features::providers::adapter::{ProviderAdapter, ProviderStream, upstream_error};
 use crate::features::providers::executor::{BoxFuture, ProviderExecutor};
+use crate::features::providers::rotation::AccountRotator;
 use crate::infrastructure::database::AppDatabase;
 use crate::infrastructure::upstream::UpstreamClient;
 use crate::protocol::model::ChatCompletionRequest;
@@ -37,6 +38,7 @@ pub struct CommandCodeExecutor {
     pub(super) client: UpstreamClient,
     pub catalog: SharedCatalog,
     pub(super) catalog_refresh_lock: Arc<tokio::sync::Mutex<()>>,
+    pub(super) rotator: Arc<AccountRotator>,
 }
 
 impl CommandCodeExecutor {
@@ -51,6 +53,7 @@ impl CommandCodeExecutor {
             client,
             catalog: CommandCodeCatalog::shared_empty(),
             catalog_refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
+            rotator: AccountRotator::shared(),
         }
     }
 
@@ -120,6 +123,10 @@ impl ProviderExecutor for CommandCodeExecutor {
 
     fn id(&self) -> &str {
         CommandCodeExecutor::id(self)
+    }
+
+    fn supports_rotation(&self) -> bool {
+        true
     }
 
     fn keys(&self) -> &'static [&'static str] {

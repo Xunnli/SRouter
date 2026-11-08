@@ -26,6 +26,7 @@ use super::types::{CodeBuddyEndpoints, Flavor};
 use crate::error::APIError;
 use crate::features::providers::adapter::{ProviderAdapter, ProviderStream, upstream_error};
 use crate::features::providers::executor::{BoxFuture, ProviderExecutor};
+use crate::features::providers::rotation::AccountRotator;
 use crate::infrastructure::database::AppDatabase;
 use crate::infrastructure::upstream::UpstreamClient;
 use crate::protocol::model::ChatCompletionRequest;
@@ -42,6 +43,7 @@ pub struct CodeBuddyExecutor {
     pub(super) client: UpstreamClient,
     pub catalog: SharedCatalog,
     pub(super) catalog_refresh_lock: Arc<tokio::sync::Mutex<()>>,
+    pub(super) rotator: Arc<AccountRotator>,
 }
 
 impl CodeBuddyExecutor {
@@ -58,6 +60,7 @@ impl CodeBuddyExecutor {
             client,
             catalog: CodeBuddyCatalog::shared_empty(),
             catalog_refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
+            rotator: AccountRotator::shared(),
         }
     }
 
@@ -135,6 +138,10 @@ impl ProviderExecutor for CodeBuddyExecutor {
 
     fn alias(&self) -> &str {
         CodeBuddyExecutor::alias(self)
+    }
+
+    fn supports_rotation(&self) -> bool {
+        true
     }
 
     fn models(&self) -> Vec<String> {

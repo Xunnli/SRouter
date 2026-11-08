@@ -520,7 +520,10 @@ fn require_database(state: &AppState) -> Result<&AppDatabase, APIError> {
 /// Builds the detail entry: the catalog entry plus its connections and models.
 /// Hidden models stay in the list, each carrying the `hidden` flag, so this view
 /// is the only place that reports what an operator hid elsewhere.
-async fn detail_entry(state: &AppState, provider_id: &str) -> Result<ProviderEntry, APIError> {
+pub(crate) async fn detail_entry(
+    state: &AppState,
+    provider_id: &str,
+) -> Result<ProviderEntry, APIError> {
     let Some(target) = resolve_target(state, provider_id).await? else {
         return Err(APIError::new(
             404,

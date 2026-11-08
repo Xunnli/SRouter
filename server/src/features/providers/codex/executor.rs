@@ -24,6 +24,7 @@ use crate::features::providers::codex::types::{
     CodexEndpoints,
 };
 use crate::features::providers::executor::{BoxFuture, ProviderExecutor};
+use crate::features::providers::rotation::AccountRotator;
 use crate::features::providers::wire::{apply_headers, bearer_token};
 use crate::infrastructure::database::AppDatabase;
 use crate::infrastructure::database::providers::load_codex_credentials;
@@ -51,6 +52,7 @@ pub struct CodexExecutor {
     catalog: SharedCatalog,
     catalog_refresh_lock: Arc<tokio::sync::Mutex<()>>,
     pub(super) token_refreshes: Arc<Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
+    pub(super) rotator: Arc<AccountRotator>,
 }
 
 impl CodexExecutor {
@@ -68,6 +70,7 @@ impl CodexExecutor {
             catalog: CodexCatalog::shared_empty(),
             catalog_refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
             token_refreshes: Arc::new(Mutex::new(HashMap::new())),
+            rotator: AccountRotator::shared(),
         }
     }
 
@@ -378,6 +381,10 @@ impl ProviderExecutor for CodexExecutor {
 
     fn alias(&self) -> &str {
         CodexExecutor::alias(self)
+    }
+
+    fn supports_rotation(&self) -> bool {
+        true
     }
 
     fn models(&self) -> Vec<String> {

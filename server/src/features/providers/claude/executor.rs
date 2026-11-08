@@ -36,9 +36,10 @@ use crate::features::providers::anthropic::{
 };
 use crate::features::providers::executor::{BoxFuture, ProviderExecutor};
 use crate::features::providers::refresh::{NoExpiry, refresh_due};
+use crate::features::providers::rotation::{AccountRotator, is_rate_limited, round_robin_enabled};
 use crate::infrastructure::database::AppDatabase;
 use crate::infrastructure::database::providers::{
-    ClaudeCredentials, load_claude_credentials, update_claude_tokens,
+    ClaudeCredentials, load_all_claude_credentials, load_claude_credentials, update_claude_tokens,
 };
 use crate::infrastructure::upstream::UpstreamClient;
 use crate::protocol::model::ChatCompletionRequest;
@@ -54,6 +55,7 @@ pub struct ClaudeExecutor {
     pub(super) client: UpstreamClient,
     pub(super) catalog: SharedCatalog,
     pub(super) refresh_locks: Arc<Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
+    pub(super) rotator: Arc<AccountRotator>,
 }
 
 impl ClaudeExecutor {
@@ -68,6 +70,7 @@ impl ClaudeExecutor {
             client,
             catalog: ClaudeCatalog::shared_empty(),
             refresh_locks: Arc::new(Mutex::new(HashMap::new())),
+            rotator: AccountRotator::shared(),
         }
     }
 
@@ -97,27 +100,65 @@ impl ClaudeExecutor {
         model: &str,
         request: &ChatCompletionRequest,
     ) -> Result<Value, APIError> {
-        let credentials = self.ensure_fresh_token(false).await?;
+        let candidates = self.candidates().await?;
         let body = anthropic_body(request, model, false);
-        let response = self.send(&credentials, model, &body, false).await?;
-        let status = response.status();
-        if !status.is_success() {
-            let detail = response.text().await.unwrap_or_default();
-            return Err(APIError::new(
-                status.as_u16(),
-                constants::providers::claude::provider_error(status.as_u16(), &detail),
+        let mut last_error: Option<APIError> = None;
+
+        for _ in 0..candidates.len() {
+            let credentials = self.pick_account(&candidates).await?;
+            let credentials = match self.ensure_fresh_token_for(&credentials, false).await {
+                Ok(c) => c,
+                Err(err) => {
+                    self.rotator.cool(&credentials.id);
+                    last_error = Some(err);
+                    continue;
+                }
+            };
+
+            let response = match self.send(&credentials, model, &body, false).await {
+                Ok(resp) => resp,
+                Err(err) => {
+                    if is_rate_limited(&err) {
+                        self.rotator.cool(&credentials.id);
+                        last_error = Some(err);
+                        continue;
+                    }
+                    return Err(err);
+                }
+            };
+
+            let status = response.status();
+            if !status.is_success() {
+                let detail = response.text().await.unwrap_or_default();
+                let err = APIError::new(
+                    status.as_u16(),
+                    constants::providers::claude::provider_error(status.as_u16(), &detail),
+                );
+                if is_rate_limited(&err) {
+                    self.rotator.cool(&credentials.id);
+                    last_error = Some(err);
+                    continue;
+                }
+                return Err(err);
+            }
+
+            let payload: Value = response.json().await.map_err(|error| {
+                APIError::new(500, constants::providers::could_not_decode_response(&error))
+            })?;
+
+            return Ok(anthropic_response_to_openai(
+                &payload,
+                &request.model,
+                now_ms() / 1000,
             ));
         }
 
-        let payload: Value = response.json().await.map_err(|error| {
-            APIError::new(500, constants::providers::could_not_decode_response(&error))
-        })?;
-
-        Ok(anthropic_response_to_openai(
-            &payload,
-            &request.model,
-            now_ms() / 1000,
-        ))
+        Err(last_error.unwrap_or_else(|| {
+            APIError::new(
+                500,
+                constants::providers::request_failed("All Claude accounts rate limited"),
+            )
+        }))
     }
 
     /// A streaming inference request, re-framed from the Anthropic SSE stream.
@@ -126,22 +167,60 @@ impl ClaudeExecutor {
         model: &str,
         request: &ChatCompletionRequest,
     ) -> Result<ProviderStream, APIError> {
-        let credentials = self.ensure_fresh_token(false).await?;
+        let candidates = self.candidates().await?;
         let body = anthropic_body(request, model, true);
-        let response = self.send(&credentials, model, &body, true).await?;
-        let status = response.status();
-        if !status.is_success() {
-            let detail = response.text().await.unwrap_or_default();
-            return Err(APIError::new(
-                status.as_u16(),
-                constants::providers::claude::provider_stream_error(status.as_u16(), &detail),
+        let mut last_error: Option<APIError> = None;
+
+        for _ in 0..candidates.len() {
+            let credentials = self.pick_account(&candidates).await?;
+            let credentials = match self.ensure_fresh_token_for(&credentials, false).await {
+                Ok(c) => c,
+                Err(err) => {
+                    self.rotator.cool(&credentials.id);
+                    last_error = Some(err);
+                    continue;
+                }
+            };
+
+            let response = match self.send(&credentials, model, &body, true).await {
+                Ok(resp) => resp,
+                Err(err) => {
+                    if is_rate_limited(&err) {
+                        self.rotator.cool(&credentials.id);
+                        last_error = Some(err);
+                        continue;
+                    }
+                    return Err(err);
+                }
+            };
+
+            let status = response.status();
+            if !status.is_success() {
+                let detail = response.text().await.unwrap_or_default();
+                let err = APIError::new(
+                    status.as_u16(),
+                    constants::providers::claude::provider_stream_error(status.as_u16(), &detail),
+                );
+                if is_rate_limited(&err) {
+                    self.rotator.cool(&credentials.id);
+                    last_error = Some(err);
+                    continue;
+                }
+                return Err(err);
+            }
+
+            return Ok(stream_response(
+                response.bytes_stream(),
+                request.model.clone(),
             ));
         }
 
-        Ok(stream_response(
-            response.bytes_stream(),
-            request.model.clone(),
-        ))
+        Err(last_error.unwrap_or_else(|| {
+            APIError::new(
+                500,
+                constants::providers::request_failed("All Claude accounts rate limited"),
+            )
+        }))
     }
 
     /// POSTs an Anthropic body with the OAuth headers. A transport failure is a
@@ -182,33 +261,55 @@ impl ClaudeExecutor {
             .map_err(|error| APIError::new(500, constants::providers::request_failed(&error)))
     }
 
-    /// The newest enabled Claude connection, or the "not connected" error.
-    pub(super) async fn credentials(&self) -> Result<ClaudeCredentials, APIError> {
+    /// Reads all enabled candidate credentials for Claude.
+    async fn candidates(&self) -> Result<Vec<ClaudeCredentials>, APIError> {
         let database = self
             .database
             .as_ref()
             .ok_or_else(|| APIError::new(500, constants::providers::claude::DATABASE_REQUIRED))?;
 
-        load_claude_credentials(database)
-            .await?
-            .ok_or_else(|| APIError::new(401, constants::providers::claude::NOT_CONNECTED))
+        let list = load_all_claude_credentials(database).await?;
+        if list.is_empty() {
+            return Err(APIError::new(
+                401,
+                constants::providers::claude::NOT_CONNECTED,
+            ));
+        }
+        Ok(list)
     }
 
-    /// Credentials whose access token is fresh, refreshing under a
-    /// per-connection lock when the token is inside the lead window. A token
-    /// without a refresh token is used as-is; a transient refresh failure keeps
-    /// a still-valid token instead of revoking the session.
-    pub(super) async fn ensure_fresh_token(
+    /// Picks a candidate according to rotation and cooldown.
+    async fn pick_account(
         &self,
+        candidates: &[ClaudeCredentials],
+    ) -> Result<ClaudeCredentials, APIError> {
+        let database = self
+            .database
+            .as_ref()
+            .ok_or_else(|| APIError::new(500, constants::providers::claude::DATABASE_REQUIRED))?;
+        let enabled = round_robin_enabled(database, CLAUDE_PROVIDER.id).await;
+        let ids: Vec<String> = candidates.iter().map(|c| c.id.clone()).collect();
+        Ok(candidates[self.rotator.choose(enabled, &ids)].clone())
+    }
+
+    /// The newest enabled Claude connection, or the "not connected" error.
+    pub(super) async fn credentials(&self) -> Result<ClaudeCredentials, APIError> {
+        let candidates = self.candidates().await?;
+        self.pick_account(&candidates).await
+    }
+
+    /// Credentials whose access token is fresh for the given candidate.
+    pub(super) async fn ensure_fresh_token_for(
+        &self,
+        credentials: &ClaudeCredentials,
         force: bool,
     ) -> Result<ClaudeCredentials, APIError> {
-        let credentials = self.credentials().await?;
-        if !force && !token_refresh_is_due(&credentials, now_ms()) {
-            return Ok(credentials);
+        if !force && !token_refresh_is_due(credentials, now_ms()) {
+            return Ok(credentials.clone());
         }
 
         let Some(refresh_token) = credentials.refresh_token.clone() else {
-            return Ok(credentials);
+            return Ok(credentials.clone());
         };
 
         let refresh_lock = {
@@ -223,17 +324,29 @@ impl ClaudeExecutor {
         };
         let _guard = refresh_lock.lock().await;
 
-        let current = self.credentials().await?;
-        if !force && !token_refresh_is_due(&current, now_ms()) {
-            return Ok(current);
+        if !force && !token_refresh_is_due(credentials, now_ms()) {
+            return Ok(credentials.clone());
         }
-        let refresh_token = current.refresh_token.clone().unwrap_or(refresh_token);
 
-        match self.refresh_token(&current, &refresh_token).await {
+        match self.refresh_token(credentials, &refresh_token).await {
             Ok(refreshed) => Ok(refreshed),
-            Err(error) if error.status() >= 500 && !current.is_expired(now_ms()) => Ok(current),
+            Err(error) if error.status() >= 500 && !credentials.is_expired(now_ms()) => {
+                Ok(credentials.clone())
+            }
             Err(error) => Err(error),
         }
+    }
+
+    /// Credentials whose access token is fresh, refreshing under a
+    /// per-connection lock when the token is inside the lead window. A token
+    /// without a refresh token is used as-is; a transient refresh failure keeps
+    /// a still-valid token instead of revoking the session.
+    pub(super) async fn ensure_fresh_token(
+        &self,
+        force: bool,
+    ) -> Result<ClaudeCredentials, APIError> {
+        let credentials = self.credentials().await?;
+        self.ensure_fresh_token_for(&credentials, force).await
     }
 
     async fn refresh_token(
@@ -408,6 +521,10 @@ impl ProviderExecutor for ClaudeExecutor {
 
     fn alias(&self) -> &str {
         ClaudeExecutor::alias(self)
+    }
+
+    fn supports_rotation(&self) -> bool {
+        true
     }
 
     fn models(&self) -> Vec<String> {

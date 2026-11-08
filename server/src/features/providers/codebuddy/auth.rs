@@ -9,19 +9,42 @@ use std::collections::BTreeMap;
 use super::executor::CodeBuddyExecutor;
 use crate::constants;
 use crate::error::APIError;
+use crate::features::providers::rotation::round_robin_enabled;
 use crate::infrastructure::database::providers::{
-    CodeBuddyCredentials, load_codebuddy_credentials,
+    CodeBuddyCredentials, load_all_codebuddy_credentials,
 };
 
 impl CodeBuddyExecutor {
-    pub(super) async fn credentials(&self) -> Result<CodeBuddyCredentials, APIError> {
+    pub(super) async fn candidates(&self) -> Result<Vec<CodeBuddyCredentials>, APIError> {
         let database = self.database.as_ref().ok_or_else(|| {
             APIError::new(500, constants::providers::codebuddy::DATABASE_REQUIRED)
         })?;
 
-        load_codebuddy_credentials(database, self.flavor.provider_id())
-            .await?
-            .ok_or_else(|| APIError::new(401, constants::providers::codebuddy::NOT_CONNECTED))
+        let list = load_all_codebuddy_credentials(database, self.flavor.provider_id()).await?;
+        if list.is_empty() {
+            return Err(APIError::new(
+                401,
+                constants::providers::codebuddy::NOT_CONNECTED,
+            ));
+        }
+        Ok(list)
+    }
+
+    pub(super) async fn pick_account(
+        &self,
+        candidates: &[CodeBuddyCredentials],
+    ) -> Result<CodeBuddyCredentials, APIError> {
+        let database = self.database.as_ref().ok_or_else(|| {
+            APIError::new(500, constants::providers::codebuddy::DATABASE_REQUIRED)
+        })?;
+        let enabled = round_robin_enabled(database, self.flavor.provider_id()).await;
+        let ids: Vec<String> = candidates.iter().map(|c| c.id.clone()).collect();
+        Ok(candidates[self.rotator.choose(enabled, &ids)].clone())
+    }
+
+    pub(super) async fn credentials(&self) -> Result<CodeBuddyCredentials, APIError> {
+        let candidates = self.candidates().await?;
+        self.pick_account(&candidates).await
     }
 
     /// The header vocabulary the Node oracle sets on every request, minus the

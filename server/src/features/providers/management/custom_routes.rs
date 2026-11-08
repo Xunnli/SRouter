@@ -119,6 +119,25 @@ pub async fn add_provider(
         _ => Uuid::new_v4().to_string(),
     };
 
+    // If a custom provider with this ID already exists, this is adding a sub-connection / additional account.
+    if let Ok(Some(parent)) = find_custom_provider(database, &id).await {
+        let conn_id = Uuid::new_v4().to_string();
+        crate::infrastructure::database::providers::add_custom_provider_connection(
+            database,
+            &parent,
+            &conn_id,
+            &name,
+            api_key.as_deref().unwrap_or(""),
+        )
+        .await?;
+
+        refresh_custom_provider(&state.providers, database, &id).await?;
+
+        let entry =
+            crate::features::providers::management::routes::detail_entry(&state, &id).await?;
+        return Ok(Json(entry));
+    }
+
     create_custom_provider(
         database,
         &id,

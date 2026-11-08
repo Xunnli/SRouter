@@ -10,19 +10,42 @@ use super::executor::CommandCodeExecutor;
 use super::types::COMMANDCODE_CLI_VERSION;
 use crate::constants;
 use crate::error::APIError;
+use crate::features::providers::rotation::round_robin_enabled;
 use crate::infrastructure::database::providers::{
-    CommandCodeCredentials, load_commandcode_credentials,
+    CommandCodeCredentials, load_all_commandcode_credentials,
 };
 
 impl CommandCodeExecutor {
-    pub(super) async fn credentials(&self) -> Result<CommandCodeCredentials, APIError> {
+    pub(super) async fn candidates(&self) -> Result<Vec<CommandCodeCredentials>, APIError> {
         let database = self.database.as_ref().ok_or_else(|| {
             APIError::new(500, constants::providers::commandcode::DATABASE_REQUIRED)
         })?;
 
-        load_commandcode_credentials(database, self.id())
-            .await?
-            .ok_or_else(|| APIError::new(401, constants::providers::commandcode::NOT_CONNECTED))
+        let list = load_all_commandcode_credentials(database, self.id()).await?;
+        if list.is_empty() {
+            return Err(APIError::new(
+                401,
+                constants::providers::commandcode::NOT_CONNECTED,
+            ));
+        }
+        Ok(list)
+    }
+
+    pub(super) async fn pick_account(
+        &self,
+        candidates: &[CommandCodeCredentials],
+    ) -> Result<CommandCodeCredentials, APIError> {
+        let database = self.database.as_ref().ok_or_else(|| {
+            APIError::new(500, constants::providers::commandcode::DATABASE_REQUIRED)
+        })?;
+        let enabled = round_robin_enabled(database, self.id()).await;
+        let ids: Vec<String> = candidates.iter().map(|c| c.id.clone()).collect();
+        Ok(candidates[self.rotator.choose(enabled, &ids)].clone())
+    }
+
+    pub(super) async fn credentials(&self) -> Result<CommandCodeCredentials, APIError> {
+        let candidates = self.candidates().await?;
+        self.pick_account(&candidates).await
     }
 
     /// The header vocabulary the CLI sends, minus the per-request

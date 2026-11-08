@@ -216,7 +216,7 @@ async fn the_request_carries_the_envelope_headers_and_generation_config() {
     );
     assert_eq!(
         fake.with(|state| state.last_user_agent.clone()),
-        "antigravity/ide/2.1.1 darwin/arm64"
+        "antigravity/ide/2.6.0 darwin/arm64"
     );
     assert_eq!(
         fake.with(|state| state.last_goog_api_client.clone()),

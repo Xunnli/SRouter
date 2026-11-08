@@ -26,26 +26,26 @@ pub use antigravity::{
     update_antigravity_project_id, update_antigravity_tokens, upsert_antigravity_connection,
 };
 pub use claude::{
-    ClaudeConnectionWrite, ClaudeCredentials, load_claude_credentials, update_claude_tokens,
-    upsert_claude_connection,
+    ClaudeConnectionWrite, ClaudeCredentials, load_all_claude_credentials, load_claude_credentials,
+    update_claude_tokens, upsert_claude_connection,
 };
 pub use cline::{
     ClineConnectionWrite, ClineCredentials, load_cline_credentials, update_cline_tokens,
     upsert_cline_connection,
 };
 pub use codebuddy::{
-    CodeBuddyConnectionWrite, CodeBuddyCredentials, load_codebuddy_credentials,
-    upsert_codebuddy_connection,
+    CodeBuddyConnectionWrite, CodeBuddyCredentials, load_all_codebuddy_credentials,
+    load_codebuddy_credentials, upsert_codebuddy_connection,
 };
 pub use codex::{
-    CodexConnectionWrite, CodexCredentials, load_codex_credentials, update_codex_tokens,
-    upsert_codex_connection,
+    CodexConnectionWrite, CodexCredentials, load_all_codex_credentials, load_codex_credentials,
+    update_codex_tokens, upsert_codex_connection,
 };
 pub use commandcode::{
-    CommandCodeConnectionWrite, CommandCodeCredentials, load_commandcode_credentials,
-    upsert_commandcode_connection,
+    CommandCodeConnectionWrite, CommandCodeCredentials, load_all_commandcode_credentials,
+    load_commandcode_credentials, upsert_commandcode_connection,
 };
-pub use custom::{CustomCredentials, load_custom_credentials};
+pub use custom::{CustomCredentials, load_all_custom_credentials, load_custom_credentials};
 pub use grok_web::{
     GrokWebConnectionWrite, GrokWebCredentials, load_grok_web_credentials,
     upsert_grok_web_connection,

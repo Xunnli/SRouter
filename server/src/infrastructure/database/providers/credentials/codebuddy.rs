@@ -55,25 +55,23 @@ pub async fn upsert_codebuddy_connection(
 /// deferred, so the rest of the stored row is left unread.
 #[derive(Clone, Debug)]
 pub struct CodeBuddyCredentials {
+    pub id: String,
     pub access_token: String,
 }
 
-/// Loads the access token of the newest enabled connection whose `provider_id`
-/// matches exactly. `codebuddy` is a prefix of `codebuddy-cn`, so an exact match
-/// is what keeps the two flavors apart (a `matches_base_id` test would not).
-pub async fn load_codebuddy_credentials(
+/// Loads all access tokens of enabled connections for `provider_id`, newest first.
+pub async fn load_all_codebuddy_credentials(
     database: &AppDatabase,
     provider_id: &str,
-) -> Result<Option<CodeBuddyCredentials>, APIError> {
+) -> Result<Vec<CodeBuddyCredentials>, APIError> {
     let Some(pool) = database.sqlite_pool() else {
-        return Ok(None);
+        return Ok(Vec::new());
     };
 
     let rows = sqlx::query(
-        "SELECT credentials FROM providers
+        "SELECT id, credentials FROM providers
          WHERE provider_id = ? AND enabled = 1
-         ORDER BY created_at DESC
-         LIMIT 1",
+         ORDER BY created_at DESC",
     )
     .bind(provider_id)
     .fetch_all(&pool)
@@ -85,15 +83,28 @@ pub async fn load_codebuddy_credentials(
         )
     })?;
 
+    let mut result = Vec::new();
     for row in &rows {
         let raw = text(row, "credentials")?;
 
-        if let Some(credentials) = parse_codebuddy_credentials(&raw) {
-            return Ok(Some(credentials));
+        if let Some(mut credentials) = parse_codebuddy_credentials(&raw) {
+            credentials.id = text(row, "id")?;
+            result.push(credentials);
         }
     }
 
-    Ok(None)
+    Ok(result)
+}
+
+/// Loads the access token of the newest enabled connection whose `provider_id`
+/// matches exactly. `codebuddy` is a prefix of `codebuddy-cn`, so an exact match
+/// is what keeps the two flavors apart (a `matches_base_id` test would not).
+pub async fn load_codebuddy_credentials(
+    database: &AppDatabase,
+    provider_id: &str,
+) -> Result<Option<CodeBuddyCredentials>, APIError> {
+    let list = load_all_codebuddy_credentials(database, provider_id).await?;
+    Ok(list.into_iter().next())
 }
 
 /// Parses a CodeBuddy credentials JSON row. Malformed JSON or a missing access
@@ -103,6 +114,7 @@ fn parse_codebuddy_credentials(raw: &str) -> Option<CodeBuddyCredentials> {
     let object = value.as_object()?;
 
     Some(CodeBuddyCredentials {
+        id: String::new(),
         access_token: credential_string(object, &["access_token", "accessToken"])?,
     })
 }

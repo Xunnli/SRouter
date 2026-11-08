@@ -48,13 +48,12 @@ pub struct ClaudeConnectionWrite {
     pub organization_id: Option<String>,
 }
 
-/// Loads the credentials of the newest enabled Claude connection. The camelCase
-/// spellings are accepted as well so a row written by the Node build still reads.
-pub async fn load_claude_credentials(
+/// Loads all credentials of enabled Claude connections, newest first.
+pub async fn load_all_claude_credentials(
     database: &AppDatabase,
-) -> Result<Option<ClaudeCredentials>, APIError> {
+) -> Result<Vec<ClaudeCredentials>, APIError> {
     let Some(pool) = database.sqlite_pool() else {
-        return Ok(None);
+        return Ok(Vec::new());
     };
 
     let rows = sqlx::query(
@@ -73,16 +72,26 @@ pub async fn load_claude_credentials(
         )
     })?;
 
+    let mut result = Vec::new();
     for row in &rows {
         let raw = text(row, "credentials")?;
 
         if let Some(mut credentials) = parse_claude_credentials(&raw) {
             credentials.id = text(row, "id")?;
-            return Ok(Some(credentials));
+            result.push(credentials);
         }
     }
 
-    Ok(None)
+    Ok(result)
+}
+
+/// Loads the credentials of the newest enabled Claude connection. The camelCase
+/// spellings are accepted as well so a row written by the Node build still reads.
+pub async fn load_claude_credentials(
+    database: &AppDatabase,
+) -> Result<Option<ClaudeCredentials>, APIError> {
+    let list = load_all_claude_credentials(database).await?;
+    Ok(list.into_iter().next())
 }
 
 /// Parses a Claude credentials JSON row. Malformed JSON or a missing access

@@ -9,27 +9,49 @@ use serde_json::Value;
 use crate::clock::now_ms;
 use crate::constants;
 use crate::error::APIError;
-use crate::features::providers::codex::types::CODEX_OAUTH_CLIENT_ID;
+use crate::features::providers::codex::types::{CODEX_OAUTH_CLIENT_ID, CODEX_PROVIDER};
 use crate::features::providers::refresh::{NoExpiry, refresh_due};
+use crate::features::providers::rotation::round_robin_enabled;
 use crate::features::providers::wire::payload_reports_invalid_grant;
 use crate::infrastructure::database::providers::{
-    CodexCredentials, load_codex_credentials, update_codex_tokens,
+    CodexCredentials, load_all_codex_credentials, update_codex_tokens,
 };
 
 use super::executor::CodexExecutor;
 
 impl CodexExecutor {
-    async fn credentials(&self) -> Result<CodexCredentials, APIError> {
+    async fn candidates(&self) -> Result<Vec<CodexCredentials>, APIError> {
         let database = self
             .database
             .as_ref()
             .ok_or_else(|| APIError::new(500, constants::providers::codex::DATABASE_REQUIRED))?;
 
-        load_codex_credentials(database)
-            .await
-            .ok()
-            .flatten()
-            .ok_or_else(|| APIError::new(401, constants::providers::codex::NOT_CONNECTED))
+        let list = load_all_codex_credentials(database).await?;
+        if list.is_empty() {
+            return Err(APIError::new(
+                401,
+                constants::providers::codex::NOT_CONNECTED,
+            ));
+        }
+        Ok(list)
+    }
+
+    async fn pick_account(
+        &self,
+        candidates: &[CodexCredentials],
+    ) -> Result<CodexCredentials, APIError> {
+        let database = self
+            .database
+            .as_ref()
+            .ok_or_else(|| APIError::new(500, constants::providers::codex::DATABASE_REQUIRED))?;
+        let enabled = round_robin_enabled(database, CODEX_PROVIDER.id).await;
+        let ids: Vec<String> = candidates.iter().map(|c| c.id.clone()).collect();
+        Ok(candidates[self.rotator.choose(enabled, &ids)].clone())
+    }
+
+    async fn credentials(&self) -> Result<CodexCredentials, APIError> {
+        let candidates = self.candidates().await?;
+        self.pick_account(&candidates).await
     }
 
     pub(super) async fn ensure_fresh_token(

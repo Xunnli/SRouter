@@ -34,21 +34,20 @@ impl CodexCredentials {
     }
 }
 
-/// Loads the credentials of the newest enabled `openai_codex` connection.
+/// Loads all credentials of enabled `openai_codex` connections, newest first.
 /// Accepts snake_case and camelCase spellings: the OAuth import writes the
 /// Node field names while the refresh path writes the schema columns.
-pub async fn load_codex_credentials(
+pub async fn load_all_codex_credentials(
     database: &AppDatabase,
-) -> Result<Option<CodexCredentials>, APIError> {
+) -> Result<Vec<CodexCredentials>, APIError> {
     let Some(pool) = database.sqlite_pool() else {
-        return Ok(None);
+        return Ok(Vec::new());
     };
 
     let rows = sqlx::query(
         "SELECT id, credentials FROM providers
          WHERE provider_id = 'openai_codex' AND enabled = 1
-         ORDER BY created_at DESC
-         LIMIT 1",
+         ORDER BY created_at DESC",
     )
     .fetch_all(&pool)
     .await
@@ -59,16 +58,27 @@ pub async fn load_codex_credentials(
         )
     })?;
 
+    let mut result = Vec::new();
     for row in &rows {
         let raw = text(row, "credentials")?;
 
         if let Some(mut credentials) = parse_codex_credentials(&raw) {
             credentials.id = text(row, "id")?;
-            return Ok(Some(credentials));
+            result.push(credentials);
         }
     }
 
-    Ok(None)
+    Ok(result)
+}
+
+/// Loads the credentials of the newest enabled `openai_codex` connection.
+/// Accepts snake_case and camelCase spellings: the OAuth import writes the
+/// Node field names while the refresh path writes the schema columns.
+pub async fn load_codex_credentials(
+    database: &AppDatabase,
+) -> Result<Option<CodexCredentials>, APIError> {
+    let list = load_all_codex_credentials(database).await?;
+    Ok(list.into_iter().next())
 }
 
 /// Parses a Codex credentials JSON row. Malformed JSON or a missing access

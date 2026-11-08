@@ -8,6 +8,8 @@ use super::executor::OpenCodeExecutor;
 use crate::clock::now_ms;
 use crate::constants;
 use crate::error::APIError;
+use crate::features::providers::opencode::types::OPENCODE_ZEN_PROVIDER;
+use crate::features::providers::rotation::round_robin_enabled;
 use crate::infrastructure::database::providers::{
     OpenCodeCredentials, load_opencode_credentials, update_opencode_tokens,
 };
@@ -18,8 +20,7 @@ const REFRESH_WINDOW_MS: i64 = 5 * 60 * 1000;
 
 impl OpenCodeExecutor {
     /// Resolves the authorization and optional org header for an upstream request.
-    /// If an active connection exists, ensures tokens are fresh and returns
-    /// `("Bearer <access_token>", Some(org_id))`.
+    /// If active connections exist, rotates across them and ensures tokens are fresh.
     /// Otherwise, falls back to `("Bearer public", None)`.
     pub async fn auth_headers(&self) -> Result<(String, Option<String>), APIError> {
         let Some(database) = self.database.as_ref() else {
@@ -31,11 +32,15 @@ impl OpenCodeExecutor {
             Err(_) => return Ok(("Bearer public".to_string(), None)),
         };
 
-        let Some(credentials) = connections.first() else {
+        if connections.is_empty() {
             return Ok(("Bearer public".to_string(), None));
-        };
+        }
 
-        let fresh = self.ensure_fresh_token_for(credentials).await?;
+        let enabled = round_robin_enabled(database, OPENCODE_ZEN_PROVIDER.id).await;
+        let ids: Vec<String> = connections.iter().map(|c| c.id.clone()).collect();
+        let picked = &connections[self.rotator.choose(enabled, &ids)];
+
+        let fresh = self.ensure_fresh_token_for(picked).await?;
         Ok((format!("Bearer {}", fresh.access_token), fresh.org_id))
     }
 

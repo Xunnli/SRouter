@@ -1631,7 +1631,9 @@ async fn the_catalog_reports_which_drivers_can_rotate_accounts() {
     assert!(supported["cline"]);
     assert!(supported["grok-web"]);
     assert!(supported["antigravity"]);
-    assert!(!supported["opencode_zen"]);
-    assert!(!supported["openai_codex"]);
-    assert!(!supported["claude"]);
+    assert!(supported["opencode_zen"]);
+    assert!(supported["openai_codex"]);
+    assert!(supported["claude"]);
+    assert!(supported["codebuddy"]);
+    assert!(supported["commandcode"]);
 }

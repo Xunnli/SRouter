@@ -32,8 +32,10 @@ use crate::protocol::model::ChatCompletionRequest;
 use crate::protocol::sse;
 
 /// The official Antigravity IDE desktop fingerprint (macOS arm64), pinned so
-/// the upstream sees the same client the Node oracle sends.
-const IDE_USER_AGENT: &str = "antigravity/ide/2.1.1 darwin/arm64";
+/// the upstream sees the same client the Node oracle sends. Upstream retires
+/// old IDE builds with a canned "no longer supported" answer, so this tracks
+/// the `antigravity/stable` build on the download page.
+const IDE_USER_AGENT: &str = "antigravity/ide/2.6.0 darwin/arm64";
 /// The `x-goog-api-client` value the IDE sends alongside a `ya29.` token.
 const GOOG_API_CLIENT: &str = "gl-node/18.0.0 gd/1.0.0";
 /// Bound on a remote image fetch, mirroring the oracle's 10s abort.

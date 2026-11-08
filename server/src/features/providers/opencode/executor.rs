@@ -18,6 +18,7 @@ use crate::features::providers::opencode::catalog::{OpenCodeCatalog, SharedCatal
 use crate::features::providers::opencode::types::{
     OPENCODE_ZEN_BASE_URL, OPENCODE_ZEN_KEYS, OPENCODE_ZEN_MODELS, OPENCODE_ZEN_PROVIDER,
 };
+use crate::features::providers::rotation::AccountRotator;
 use crate::features::providers::wire::{random_hex, stream_error_message};
 use crate::infrastructure::database::AppDatabase;
 use crate::infrastructure::upstream::UpstreamClient;
@@ -56,6 +57,7 @@ pub struct OpenCodeExecutor {
     pub(super) catalog_refresh_lock: Arc<tokio::sync::Mutex<()>>,
     pub(super) database: Option<AppDatabase>,
     pub(super) token_refreshes: Arc<StdMutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
+    pub(super) rotator: Arc<AccountRotator>,
 }
 
 impl OpenCodeExecutor {
@@ -77,6 +79,7 @@ impl OpenCodeExecutor {
             catalog_refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
             database,
             token_refreshes: Arc::new(StdMutex::new(HashMap::new())),
+            rotator: AccountRotator::shared(),
         }
     }
 
@@ -551,6 +554,10 @@ impl ProviderExecutor for OpenCodeExecutor {
 
     fn id(&self) -> &str {
         OpenCodeExecutor::id(self)
+    }
+
+    fn supports_rotation(&self) -> bool {
+        true
     }
 
     fn keys(&self) -> &'static [&'static str] {

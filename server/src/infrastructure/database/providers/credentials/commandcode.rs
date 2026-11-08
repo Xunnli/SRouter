@@ -55,23 +55,23 @@ pub async fn upsert_commandcode_connection(
 /// there is no token to refresh and no expiry to sweep.
 #[derive(Clone, Debug)]
 pub struct CommandCodeCredentials {
+    pub id: String,
     pub access_token: String,
 }
 
-/// Loads the key of the newest enabled connection whose `provider_id` matches.
-pub async fn load_commandcode_credentials(
+/// Loads all keys of enabled connections whose `provider_id` matches, newest first.
+pub async fn load_all_commandcode_credentials(
     database: &AppDatabase,
     provider_id: &str,
-) -> Result<Option<CommandCodeCredentials>, APIError> {
+) -> Result<Vec<CommandCodeCredentials>, APIError> {
     let Some(pool) = database.sqlite_pool() else {
-        return Ok(None);
+        return Ok(Vec::new());
     };
 
     let rows = sqlx::query(
-        "SELECT credentials FROM providers
+        "SELECT id, credentials FROM providers
          WHERE provider_id = ? AND enabled = 1
-         ORDER BY created_at DESC
-         LIMIT 1",
+         ORDER BY created_at DESC",
     )
     .bind(provider_id)
     .fetch_all(&pool)
@@ -83,15 +83,26 @@ pub async fn load_commandcode_credentials(
         )
     })?;
 
+    let mut result = Vec::new();
     for row in &rows {
         let raw = text(row, "credentials")?;
 
-        if let Some(credentials) = parse_commandcode_credentials(&raw) {
-            return Ok(Some(credentials));
+        if let Some(mut credentials) = parse_commandcode_credentials(&raw) {
+            credentials.id = text(row, "id")?;
+            result.push(credentials);
         }
     }
 
-    Ok(None)
+    Ok(result)
+}
+
+/// Loads the key of the newest enabled connection whose `provider_id` matches.
+pub async fn load_commandcode_credentials(
+    database: &AppDatabase,
+    provider_id: &str,
+) -> Result<Option<CommandCodeCredentials>, APIError> {
+    let list = load_all_commandcode_credentials(database, provider_id).await?;
+    Ok(list.into_iter().next())
 }
 
 /// Parses a credentials JSON row. Malformed JSON or a missing key yields `None`,
@@ -101,6 +112,7 @@ fn parse_commandcode_credentials(raw: &str) -> Option<CommandCodeCredentials> {
     let object = value.as_object()?;
 
     Some(CommandCodeCredentials {
+        id: String::new(),
         access_token: credential_string(object, &["access_token", "accessToken"])?,
     })
 }
